@@ -40,12 +40,14 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          yes | sdkmanager --licenses >/dev/null
-
+      
+          # 这里会触发 yes Broken pipe，所以必须吞掉失败码
+          yes | sdkmanager --licenses >/dev/null 2>&1 || true
+      
           APP_GRADLE=""
           if [ -f "app/build.gradle" ]; then APP_GRADLE="app/build.gradle"; fi
           if [ -f "app/build.gradle.kts" ]; then APP_GRADLE="app/build.gradle.kts"; fi
-
+      
           SDK=""
           BT=""
           NDK=""
@@ -54,16 +56,16 @@ jobs:
             BT="$(grep -Eo 'buildToolsVersion[ =]*"[^"]+"' "$APP_GRADLE" | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || true)"
             NDK="$(grep -Eo 'ndkVersion[ =]*"[^"]+"' "$APP_GRADLE" | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || true)"
           fi
-
+      
           echo "Detected: compileSdk=$SDK buildTools=$BT ndkVersion=$NDK"
-
+      
           pkgs=("platform-tools")
           if [ -n "$SDK" ]; then pkgs+=("platforms;android-$SDK"); fi
           if [ -n "$BT" ]; then pkgs+=("build-tools;$BT"); fi
           if [ -n "$NDK" ]; then pkgs+=("ndk;$NDK"); fi
+      
+          yes | sdkmanager "${pkgs[@]}" >/dev/null 2>&1 || true
 
-          # 安装失败不直接让流程挂掉（不同项目/版本可能不一致）
-          yes | sdkmanager "${pkgs[@]}" || true
 
       - name: Make gradlew executable
         working-directory: ${{ steps.locate.outputs.dir }}
