@@ -1,0 +1,133 @@
+name: Android Build (APK)
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-apk:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Locate Gradle project dir
+        id: locate
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [ -f "FDetector/gradlew" ]; then
+            echo "dir=FDetector" >> "$GITHUB_OUTPUT"
+          elif [ -f "gradlew" ]; then
+            echo "dir=." >> "$GITHUB_OUTPUT"
+          else
+            echo "❌ gradlew not found (expected ./gradlew or ./FDetector/gradlew)" >&2
+            exit 1
+          fi
+          echo "✅ project dir = $(cat $GITHUB_OUTPUT | sed -n 's/^dir=//p')"
+
+      - name: Setup Gradle cache
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK components (best effort)
+        working-directory: ${{ steps.locate.outputs.dir }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          yes | sdkmanager --licenses >/dev/null
+
+          APP_GRADLE=""
+          if [ -f "app/build.gradle" ]; then APP_GRADLE="app/build.gradle"; fi
+          if [ -f "app/build.gradle.kts" ]; then APP_GRADLE="app/build.gradle.kts"; fi
+
+          SDK=""
+          BT=""
+          NDK=""
+          if [ -n "$APP_GRADLE" ]; then
+            SDK="$(grep -Eo 'compileSdk(Version)?[ =]*[0-9]+' "$APP_GRADLE" | grep -Eo '[0-9]+' | head -n1 || true)"
+            BT="$(grep -Eo 'buildToolsVersion[ =]*"[^"]+"' "$APP_GRADLE" | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || true)"
+            NDK="$(grep -Eo 'ndkVersion[ =]*"[^"]+"' "$APP_GRADLE" | sed -E 's/.*"([^"]+)".*/\1/' | head -n1 || true)"
+          fi
+
+          echo "Detected: compileSdk=$SDK buildTools=$BT ndkVersion=$NDK"
+
+          pkgs=("platform-tools")
+          if [ -n "$SDK" ]; then pkgs+=("platforms;android-$SDK"); fi
+          if [ -n "$BT" ]; then pkgs+=("build-tools;$BT"); fi
+          if [ -n "$NDK" ]; then pkgs+=("ndk;$NDK"); fi
+
+          # 安装失败不直接让流程挂掉（不同项目/版本可能不一致）
+          yes | sdkmanager "${pkgs[@]}" || true
+
+      - name: Make gradlew executable
+        working-directory: ${{ steps.locate.outputs.dir }}
+        shell: bash
+        run: chmod +x ./gradlew
+
+      # --- Try build with JDK 17 ---
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Build (JDK 17)
+        id: build17
+        continue-on-error: true
+        working-directory: ${{ steps.locate.outputs.dir }}
+        shell: bash
+        run: ./gradlew --no-daemon assembleDebug
+
+      # --- Fallback to JDK 11 ---
+      - name: Setup Java 11
+        if: steps.build17.outcome == 'failure'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "11"
+
+      - name: Build (JDK 11)
+        id: build11
+        if: steps.build17.outcome == 'failure'
+        continue-on-error: true
+        working-directory: ${{ steps.locate.outputs.dir }}
+        shell: bash
+        run: ./gradlew --no-daemon assembleDebug
+
+      # --- Fallback to JDK 8 ---
+      - name: Setup Java 8
+        if: steps.build17.outcome == 'failure' && steps.build11.outcome == 'failure'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "8"
+
+      - name: Build (JDK 8)
+        if: steps.build17.outcome == 'failure' && steps.build11.outcome == 'failure'
+        working-directory: ${{ steps.locate.outputs.dir }}
+        shell: bash
+        run: ./gradlew --no-daemon assembleDebug
+
+      - name: List APK outputs
+        working-directory: ${{ steps.locate.outputs.dir }}
+        shell: bash
+        run: |
+          echo "== APKs =="
+          find . -type f -path "*build/outputs/apk*/*.apk" -print || true
+          echo "== AABs =="
+          find . -type f -path "*build/outputs/bundle*/*.aab" -print || true
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: apk-debug
+          path: |
+            ${{ steps.locate.outputs.dir }}/**/build/outputs/apk/**/*.apk
+            ${{ steps.locate.outputs.dir }}/**/build/outputs/bundle/**/*.aab
+          if-no-files-found: error
